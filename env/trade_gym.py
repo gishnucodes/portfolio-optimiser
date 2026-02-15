@@ -38,37 +38,48 @@ class TradeGym(gym.Env):
 
     def __init__(
         self,
-        df: pd.DataFrame,
+        df: pd.DataFrame | dict[str, pd.DataFrame],
         initial_cash: float = 10_000.0,
         trade_fraction: float = 0.20,
         windows_per_day: int = 3,
+        strategy: str = "standard",
     ) -> None:
         """
         Parameters
         ----------
-        df : pd.DataFrame
-            OHLCV data **with indicators already computed** (via
-            ``compute_indicators``).  Rows with NaN in any indicator column
-            are automatically dropped.
-        initial_cash : float
-            Starting portfolio cash.
-        trade_fraction : float
-            Fraction of available cash (buy) / holdings (sell) per trade.
-        windows_per_day : int
-            Number of decision steps per episode (default 3).
+        df : pd.DataFrame | dict[str, pd.DataFrame]
+            OHLCV data with indicators. Can be a single DataFrame or a dict
+            mapping ticker -> DataFrame.
         """
         super().__init__()
 
-        # Clean data — drop warmup NaN rows
-        self._full_df = df.dropna(subset=INDICATOR_COLS).reset_index(drop=True)
-        assert len(self._full_df) >= windows_per_day, (
-            f"Need at least {windows_per_day} rows after dropping NaN, "
-            f"got {len(self._full_df)}"
-        )
+        self._dfs: list[pd.DataFrame] = []
+        self._vols: list[np.ndarray] = []
+
+        # Normalize input to a list of DataFrames
+        input_dfs = df if isinstance(df, dict) else {"default": df}
+
+        for _, d in input_dfs.items():
+            # Clean data
+            clean_df = d.dropna(subset=INDICATOR_COLS).reset_index(drop=True)
+            if len(clean_df) >= windows_per_day:
+                self._dfs.append(clean_df)
+                
+                # Pre-compute volatility
+                log_ret = np.log(clean_df["Close"] / clean_df["Close"].shift(1))
+                vol = log_ret.rolling(20).std().fillna(log_ret.std()).values
+                self._vols.append(vol)
+
+        assert len(self._dfs) > 0, "No valid DataFrames provided (check lengths)"
 
         self._initial_cash = initial_cash
         self._trade_fraction = trade_fraction
         self._windows_per_day = windows_per_day
+        self._strategy = strategy
+        
+        # Current episode state
+        self._full_df: pd.DataFrame = self._dfs[0]
+        self._volatility: np.ndarray = self._vols[0]
 
         # Spaces
         self.action_space = gym.spaces.Discrete(3)
@@ -76,11 +87,7 @@ class TradeGym(gym.Env):
             low=-np.inf, high=np.inf, shape=(n_features(),), dtype=np.float32,
         )
 
-        # Rolling volatility (for reward scaling) — 20-period std of log returns
-        log_ret = np.log(self._full_df["Close"] / self._full_df["Close"].shift(1))
-        self._volatility = log_ret.rolling(20).std().fillna(log_ret.std()).values
-
-        # State variables (initialised in reset)
+        # State variables
         self._cash: float = 0.0
         self._shares: float = 0.0
         self._avg_cost: float = 0.0
@@ -99,6 +106,11 @@ class TradeGym(gym.Env):
     ) -> tuple[np.ndarray, dict[str, Any]]:
         super().reset(seed=seed)
 
+        # Pick a random ticker/dataframe for this episode
+        df_idx = self.np_random.integers(0, len(self._dfs))
+        self._full_df = self._dfs[df_idx]
+        self._volatility = self._vols[df_idx]
+
         self._cash = self._initial_cash
         self._shares = 0.0
         self._avg_cost = 0.0
@@ -111,14 +123,37 @@ class TradeGym(gym.Env):
 
         self._prev_equity = self._equity()
 
+        if options and "strategy" in options:
+            self._strategy = options["strategy"]
+
         return self._obs(), {}
 
     def step(
         self, action: int,
     ) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         price = self._current_price()
+        
+        # ── Strategy Overrides ───────────────────────────────────────────────
+        if self._strategy == "dip_buyer":
+            # If trying to BUY, check constraints
+            if action == self.BUY:
+                # Maintain ~20% cash reserve (assuming $10k initial) unless RSI < 30
+                # Using hardcoded $2000 for simplicity as requested
+                if self._cash < 2000.0:
+                    # Check RSI (index 2 in INDICATOR_COLS list based on pipeline.py)
+                    # "Close", "Volume", "RSI_14"... so index 2
+                    rsi = self._full_df.iloc[self._global_idx]["RSI_14"]
+                    if rsi > 30:
+                        action = self.HOLD  # Block buy
 
-        # Execute trade
+        elif self._strategy == "momentum":
+            # If trying to BUY, ensure trend is up (Price > EMA_50)
+            if action == self.BUY:
+                 ema50 = self._full_df.iloc[self._global_idx]["EMA_50"]
+                 if price < ema50:
+                     action = self.HOLD # Block buy against trend
+
+        # ── Execution ────────────────────────────────────────────────────────
         if action == self.BUY:
             invest = self._cash * self._trade_fraction
             if invest > 0 and price > 0:
@@ -159,6 +194,7 @@ class TradeGym(gym.Env):
             "shares": self._shares,
             "price": self._current_price(),
             "step_in_day": self._step_in_day,
+            "strategy": self._strategy,
         }
 
         return self._obs(), reward, terminated, truncated, info
