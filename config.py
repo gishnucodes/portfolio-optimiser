@@ -35,6 +35,12 @@ ACTIVE_EXPERIMENTS = {
         "type": "rl",
         "enabled": True,
     },
+    "live_llm_v1": {
+        "model_path": None,
+        "strategy": "balanced",
+        "type": "llm",
+        "enabled": True,
+    },
 }
 
 # ── Ticker universe ─────────────────────────────────────────────────────────

@@ -12,6 +12,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agents.rl_agent import RLTrader
+from agents.llm_agent import LLMTrader
 from config import ACTIVE_EXPERIMENTS, MODEL_DIR, ROOT_DIR, TICKERS, TRADING_WINDOWS, INITIAL_CASH
 from data.pipeline import build_state_vector, compute_indicators, fetch_historical
 from engine.ledger import log_decision, log_daily_summary
@@ -138,15 +139,18 @@ def run_experiments():
             
         logger.info(f"👉 Running {exp_name}...")
         
-        # Load Model
+        # Load Agent
+        agent = None
         try:
-            model_path = config['model_path']
-            if not model_path.endswith('.zip'): model_path += ".zip"
-            model_path = ROOT_DIR / model_path
-            
-            agent = RLTrader.load(model_path)
+            if config["type"] == "rl":
+                model_path = config['model_path']
+                if not model_path.endswith('.zip'): model_path += ".zip"
+                model_path = ROOT_DIR / model_path
+                agent = RLTrader.load(model_path)
+            elif config["type"] == "llm":
+                agent = LLMTrader() # Uses credentials from env/config
         except Exception as e:
-            logger.error(f"Failed to load model {model_path}: {e}")
+            logger.error(f"Failed to load agent {exp_name}: {e}")
             continue
 
         # Restore Portfolio
@@ -162,41 +166,73 @@ def run_experiments():
                 row = d["row"]
                 price = d["price"]
                 
-                # Build State
-                prices = {t: data_cache[t]["price"] for t in data_cache}
-                obs = build_state_vector(
-                    row,
-                    cash=port.cash,
-                    holdings=port.get_holdings_value(prices),
-                    unrealized_pnl=port.get_unrealised_pnl(prices),
-                )
+                # Prediction Logic
+                action_str = "HOLD"
+                confidence = 0.0
+                reasoning = f"Strategy: {config['strategy']} | Mode: Live"
+
+                if config["type"] == "rl":
+                    # Build State
+                    prices = {t: data_cache[t]["price"] for t in data_cache}
+                    obs = build_state_vector(
+                        row,
+                        cash=port.cash,
+                        holdings=port.get_holdings_value(prices),
+                        unrealized_pnl=port.get_unrealised_pnl(prices),
+                    )
+                    
+                    # Predict
+                    action_id, conf = agent.predict(obs) # type: ignore
+                    action_str = {0: "HOLD", 1: "BUY", 2: "SELL"}[int(action_id)]
+                    confidence = float(conf) if conf is not None else 0.0 # RL might not give confidence
                 
-                # Predict
-                action_id, conf = agent.predict(obs)
-                raw_action = {0: "HOLD", 1: "BUY", 2: "SELL"}[action_id]
+                elif config["type"] == "llm":
+                    # Build LLM State Dict
+                    prices = {t: data_cache[t]["price"] for t in data_cache}
+                    state_dict = {
+                        "ticker": ticker,
+                        "price": price,
+                        "volume": row["Volume"],
+                        "rsi": row["RSI_14"],
+                        "macd": row["MACD"],
+                        "macd_signal": row["MACD_signal"],
+                        "macd_hist": row["MACD_hist"],
+                        "ema20": row["EMA_20"],
+                        "ema50": row["EMA_50"],
+                        "cash": port.cash,
+                        "holdings": port.get_holdings_value(prices),
+                        "unrealised_pnl": port.get_unrealised_pnl(prices),
+                    }
+                    
+                    # Predict
+                    decision = agent.predict(state_dict) # type: ignore
+                    action_str = decision.get("action", "HOLD")
+                    reasoning = decision.get("reasoning", "")
                 
-                # Apply Constraints
-                final_action = apply_strategy_constraints(
-                    config["strategy"], raw_action, price, port.cash, d["indicators"]
-                )
-                
+                # Apply Constraints (Shared for both RL and LLM strategies if needed, currently mainly RL)
+                if config["type"] == "rl": # LLM constraints are usually internal, but we can apply here too
+                     final_action = apply_strategy_constraints(
+                        config["strategy"], action_str, price, port.cash, d["indicators"]
+                    )
+                else:
+                    final_action = action_str
+
                 # Execute
                 receipt = port.execute_trade(ticker, final_action, price)
                 
-                # Log Decision (if actionable)
-                # Logging HOLDs adds noise, maybe skip? No, keep logic consistent.
-                # Only log unique HOLDs? No, DB handles it.
-                log_decision(
-                    date=d["date"], # Use market date
-                    window=window,
-                    ticker=ticker,
-                    agent=exp_name,
-                    action=final_action,
-                    confidence=conf,
-                    reasoning=f"Strategy: {config['strategy']} | Mode: Live",
-                    price=price,
-                    mode="live"
-                )
+                # Log Decision (if actionable or LLM with reasoning)
+                if final_action != "HOLD" or config["type"] == "llm":
+                    log_decision(
+                        date=d["date"], # Use market date
+                        window=window,
+                        ticker=ticker,
+                        agent=exp_name,
+                        action=final_action,
+                        confidence=confidence,
+                        reasoning=reasoning,
+                        price=price,
+                        mode="live"
+                    )
 
         # Update State & Log Summary
         prices = {t: data_cache[t]["price"] for t in data_cache}
