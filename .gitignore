@@ -12,8 +12,8 @@ dist/
 build/
 
 # Data
-*.db
-models/*.zip
+# *.db
+# models/*.zip
 
 # IDE
 .vscode/
