@@ -13,13 +13,16 @@ import streamlit as st
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from config import DB_PATH, TICKERS
-from engine.ledger import get_decisions, get_equity_curve, get_latest_summary
+from engine.ledger import get_decisions, get_equity_curve, get_latest_summary, init_db
 from evaluation.metrics import (
     calculate_cumulative_return,
     calculate_max_drawdown,
     calculate_sharpe,
     calculate_win_rate,
 )
+
+# Ensure DB exists
+init_db()
 
 st.set_page_config(
     page_title="RL vs. LLM Trader",
