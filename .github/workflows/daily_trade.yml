@@ -42,7 +42,8 @@ jobs:
           if [[ -n $(git status -s) ]]; then
             git add daily_ledger.db live_portfolios.json
             git commit -m "🤖 Auto-trade: Update ledger and portfolios [skip ci]"
-            git push
+            git pull --rebase origin main
+            git push origin HEAD:main
           else
             echo "No changes to commit"
           fi
