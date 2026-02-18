@@ -163,6 +163,7 @@ if not summary_live.empty:
 
     with col_live_chart:
         st.subheader("Performance")
+        summary_live = summary_live.drop_duplicates(subset=["date", "agent"], keep="last")
         live_pivot = summary_live.pivot(index="date", columns="agent", values="equity")
         fig_live = px.line(live_pivot, markers=True)
         fig_live.update_layout(
