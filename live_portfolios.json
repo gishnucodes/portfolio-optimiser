@@ -1,6 +1,6 @@
 {
     "live_momentum_v1": {
-        "cash": 1.9792878830464143e-153,
+        "cash": 3.565568069018707e-155,
         "positions": {
             "NVDA": {
                 "shares": 29.532658336098564,
@@ -82,7 +82,7 @@
         }
     },
     "live_standard_v1": {
-        "cash": 1.5738273e-316,
+        "cash": 1.9483e-319,
         "positions": {
             "AAPL": {
                 "shares": 8.759429130115505,
